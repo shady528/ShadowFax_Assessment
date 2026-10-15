@@ -1,0 +1,26 @@
+# Python bytecode / caches
+__pycache__/
+*.py[cod]
+*.cpython-*
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual env
+.venv/
+venv/
+.venv
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+*:Zone.Identifier
+*.swp
+
+# Secrets
+.env
