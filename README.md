@@ -13,7 +13,7 @@ python -m ipykernel install --user --name shadowfax
 - Part 1 (leakage audit): `notebooks/01_leakage_audit.ipynb` — answers Q1–Q6, ends with a copy-paste "PART 1 ANSWERS" block
 - Part 2 (dispute model): `notebooks/02_dispute_model.ipynb` → `outputs/september_predictions.csv` (header `awb,prob`, 1,800 rows); ends with a copy-paste "PART 2 ANSWERS" block
 
-- Part 3 (contract assistant): `python -m src.assistant` — interactive terminal (/help, /sources, /history, /clear, /provider, /exit); `python -m src.assistant --questions questions.txt` answers a list and writes `outputs/contract_answers.md`. Uses Claude, OpenAI or Gemini — whichever key is set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — else quotes the matching clauses. Full guide: [`src/assistant/README.md`](src/assistant/README.md).
+- Part 3 (contract assistant): `python -m src.assistant` — interactive terminal (/help, /sources, /history, /clear, /provider, /exit); `python -m src.assistant --questions questions.txt` answers a list and writes `outputs/contract_answers.md`. Uses Claude, OpenAI or Gemini — whichever key is set (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`) — else quotes the matching clauses. Full guide and architecture diagrams: [`src/assistant/README.md`](src/assistant/README.md).
 
 ## Approach
 ### Part 1 — Leakage audit

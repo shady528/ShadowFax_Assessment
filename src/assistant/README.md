@@ -77,23 +77,201 @@ python -m src.assistant --questions questions.txt            # writes outputs/co
 python -m src.assistant --questions questions.txt --provider gemini --out outputs/answers_gemini.md
 ```
 
-## How it answers
+## Architecture
 
+GitHub (and VS Code with a Mermaid extension) renders the diagrams below.
+
+### 1. Components
+
+```mermaid
+flowchart LR
+    subgraph IN["Inputs"]
+        MD[("contracts_and_rate_card.md<br/>Schedule A + 12 agreements")]
+        CSV[("shipments.csv<br/>delivery city → state")]
+        ENV[(".env<br/>API keys")]
+    end
+
+    subgraph IDX["Index — built once at startup"]
+        PARSE["clauses.py<br/>split into 215 citable chunks"]
+        LINK["link clauses<br/>references + annexure siblings"]
+        BM25["retrieve.py<br/>BM25 index + merchant names"]
+        PARSE --> LINK --> BM25
+    end
+
+    subgraph CORE["Per question — assistant.py"]
+        MEM["Memory<br/>last 5 turns"]
+        ROUTE{"Route"}
+        CALC["calculate.py<br/>read merchant, date, kg, dims,<br/>COD value, destination"]
+        RET["Retriever<br/>BM25 · clause-id lookup ·<br/>per-merchant · linked clauses"]
+        GATE{"Strong enough<br/>match?"}
+        CHECK["Citation check"]
+    end
+
+    subgraph ENGINE["Billing engine (Part 1)"]
+        BILL["billing.py"]
+        TERMS["contracts.py"]
+    end
+
+    subgraph WRITERS["Answer writers — llm.py"]
+        CL["Claude"]
+        OA["OpenAI"]
+        GE["Gemini"]
+        EX["Extractive<br/>quote clauses, no LLM"]
+    end
+
+    UI["__main__.py<br/>terminal UI · batch mode"]
+
+    MD --> PARSE
+    CSV --> CALC
+    ENV --> WRITERS
+    UI -->|question| MEM --> ROUTE
+    ROUTE -->|"one merchant + charge word + ₹/kg/dims"| CALC
+    CALC --> BILL --> TERMS
+    ROUTE -->|otherwise| RET
+    BM25 --> RET
+    RET --> GATE
+    GATE -->|no| NF["NOT IN DOCUMENTS<br/>(no LLM call)"]
+    GATE -->|yes| WRITERS
+    WRITERS --> CHECK
+    CHECK --> UI
+    BILL --> UI
+    NF --> UI
 ```
-question
-  │
-  ├─ memory: follow-up? ("and for M03?")  → reuse last question's topic / merchant
-  │
-  ├─ calculation? (merchant + charge word + ₹ / kg / dimensions)
-  │      └─ billing engine (src/billing.py + src/contracts.py) → step-by-step answer, each step cited
-  │
-  └─ retrieval
-         ├─ exact clause id in the question (e.g. "M04-§6.1")  → that clause
-         ├─ BM25 over clauses, filtered to the merchant(s) named (+ Schedule A)
-         ├─ add linked clauses (the amendment that changes a clause, the Schedule A section it points to)
-         ├─ best match too weak?  → "NOT IN DOCUMENTS" (no LLM call)
-         └─ LLM writes the answer from those clauses only → citations checked against what was retrieved
+
+### 2. Question flow
+
+```mermaid
+flowchart TD
+    Q(["Question typed"]) --> STRIP["Drop a leading 'Q1.' / '3)'"]
+    STRIP --> FU{"Follow-up?<br/>starts with 'and / what about…',<br/>or fewer than 2 own topic words"}
+    FU -->|yes| REUSE["Reuse last turn's merchant(s);<br/>if no topic words, add last turn's query"]
+    FU -->|no| MER["Detect merchants<br/>by id (M07) or name (Patang)"]
+    REUSE --> MER
+    MER --> ISCALC{"Exactly one merchant<br/>and a calculation?<br/>(fee / charge / cost + ₹, kg or LxWxH)"}
+
+    ISCALC -->|yes| PARAMS["Read date, weight, dimensions,<br/>COD / prepaid + value, 'to city'"]
+    PARAMS --> MISSING{"Inputs missing?"}
+    MISSING -->|yes| ASK["Ask for what's missing<br/>(never guess)"]
+    MISSING -->|no| ENGINE["Billing engine:<br/>terms for that date → weight → zone →<br/>freight → COD fee; cite clause per step"]
+
+    ISCALC -->|no| CMP{"'Which merchant… / highest /<br/>lowest' and no merchant named?"}
+    CMP -->|yes| EACH["Best clause for EACH merchant<br/>+ top 2 Schedule A sections"]
+    CMP -->|no| SEARCH["Clause-id lookup + BM25 top 5<br/>(named merchant + Schedule A)"]
+    EACH --> LINKS["Add linked clauses<br/>(amendments, Schedule A sections)"]
+    SEARCH --> LINKS
+    LINKS --> WEAK{"Clause id given, or best score ≥ 3.0<br/>with ≥ 2 question words matched?"}
+    WEAK -->|no| NF["NOT IN DOCUMENTS<br/>no LLM call"]
+    WEAK -->|yes| MODE{"Provider"}
+    MODE -->|extractive| QUOTE["Quote top clause +<br/>its amendment / Schedule A link"]
+    MODE -->|"claude / openai / gemini"| LLM["LLM answers from the<br/>retrieved clauses only"]
+    LLM -->|call fails| QUOTE
+    LLM --> CITE["Every cited id must be<br/>among retrieved clauses → else ⚠"]
+    QUOTE --> CITE
+
+    ASK --> OUT
+    ENGINE --> OUT
+    NF --> OUT
+    CITE --> OUT(["Answer block: Answer · Clause references ·<br/>Warnings · Answered by"])
+    OUT --> SAVE["Save turn to memory (last 5)"]
 ```
+
+### 3. Retrieval
+
+```mermaid
+flowchart LR
+    Q["Question"] --> TOK["Tokenise<br/>lowercase · drop stop words ·<br/>'cities'→'city', 'invoices'→'invoice'"]
+    TOK --> DROP["Remove the merchant's own<br/>name/id words<br/>(the filter handles those)"]
+    DROP --> SYN["Add synonyms<br/>'payment' → 'payable'<br/>'notice' → 'terminate'"]
+    SYN --> POOL["Candidate pool<br/>named merchant's clauses<br/>+ Schedule A<br/>(all clauses if none named)"]
+    POOL --> SCORE["BM25 score per clause<br/>× 1.25 for the named<br/>merchant's own clauses"]
+    SCORE --> TOP["Top 5"]
+    ID["Clause id in question<br/>e.g. M04-§6.1"] --> EXACT["Exact match<br/>(always kept)"]
+    TOP --> EXP["Expand links<br/>(only for merchants in scope)"]
+    EXACT --> EXP
+    EXP --> HITS["Retrieved clauses<br/>with score · matched words · how found<br/>(shown by /sources)"]
+```
+
+### 4. Amendments travel with the clause they change
+
+Links are found by scanning each clause for clause ids and "section A.x", in both directions, and clauses of
+the same annexure are linked to each other. Retrieving any one of them brings the rest.
+
+```mermaid
+flowchart LR
+    subgraph M09["Lakdi Furniture (M09)"]
+        A1["M09-§2.1<br/>discount 8%"]
+        B1["M09-Ann1.1<br/>12% from 1 Sep 2026"]
+        C1["M09-Ann1.2<br/>other terms unchanged"]
+        A1 <-->|"amended by"| B1
+        B1 <-->|"same annexure"| C1
+    end
+    subgraph M02["Tara Spices (M02)"]
+        A2["M02-§3.1<br/>COD: max ₹25 or 1.5%"]
+        B2["M02-Ann1.1<br/>no COD fee 1–31 Aug 2026"]
+        C2["M02-Ann1.2<br/>§3.1 applies again from 1 Sep"]
+        A2 <-->|"referenced by"| C2
+        B2 <-->|"same annexure"| C2
+    end
+    A2 <-->|"in place of"| SA4["A.4<br/>Schedule A COD fee"]
+```
+
+In calculations the dates are applied in code (`contracts.py` amendments with start/end dates), not by the LLM.
+
+### 5. One question, end to end (LLM mode)
+
+```mermaid
+sequenceDiagram
+    actor U as User
+    participant T as Terminal UI
+    participant A as Assistant
+    participant R as Retriever
+    participant L as LLM provider
+    U->>T: What freight discount applies to a<br/>Lakdi Furniture shipment on 5 Sep 2026?
+    T->>A: ask(question)
+    A->>A: memory: not a follow-up · merchant = M09 · not a calculation
+    A->>R: search(question, merchants=[M09])
+    R-->>A: M09-Ann1.1 (top score), M09-§2.1, A.5, … + linked clauses
+    A->>A: best match strong enough → continue
+    A->>L: system rules + retrieved clauses + question (+ last 5 turns)
+    alt provider answers
+        L-->>A: "12% … [M09-Ann1.1] … replaces 8% in [M09-§2.1]"
+    else quota / overload / timeout
+        L-->>A: error
+        A->>A: quote the clauses instead, add ⚠ warning
+    end
+    A->>A: citation check: every id was retrieved?
+    A-->>T: Answer · Clause references · Warnings · Answered by
+    T-->>U: structured answer block
+    A->>A: save turn to memory
+```
+
+### 6. Choosing a provider, and Gemini's model fallback
+
+```mermaid
+flowchart TD
+    START(["Start"]) --> FORCED{"--provider or<br/>RAG_PROVIDER set?"}
+    FORCED -->|yes| USE["Use it<br/>(error if its key is missing)"]
+    FORCED -->|no| K1{"ANTHROPIC_API_KEY?"}
+    K1 -->|yes| CLAUDE["Claude · claude-opus-5-5<br/>server-side refusal fallback"]
+    K1 -->|no| K2{"OPENAI_API_KEY?"}
+    K2 -->|yes| OPENAI["OpenAI · gpt-4.1"]
+    K2 -->|no| K3{"GEMINI_API_KEY /<br/>GOOGLE_API_KEY?"}
+    K3 -->|yes| GEM["Gemini"]
+    K3 -->|no| EXT["Extractive (offline)"]
+
+    GEM --> G1["gemini-3.5-flash"]
+    G1 -->|"429 quota used up"| G2["gemini-3.6-flash"]
+    G2 -->|429| G3["gemini-3-flash-preview"]
+    G3 -->|429| G4["gemini-3.5-flash-lite"]
+    G4 -->|429| G5["gemini-3.1-flash-lite"]
+    G5 -->|"all fail"| EXT2["Quote clauses for this question<br/>+ ⚠ warning"]
+    G1 -.->|"503 overloaded:<br/>wait 10 s, 20 s, then next model"| G2
+```
+
+Each Gemini call has a 30 s timeout and the SDK's own retries are off, so a call never hangs. A key that exists but
+has no credits still counts as available (see Limitations).
+
+## How it's built
 
 ### Pieces
 
